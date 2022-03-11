@@ -35,7 +35,7 @@ subroutine read_phantom_bin_files(iunit,n_files,filenames,x,y,z,h,vx,vy,vz,parti
  integer, parameter :: maxinblock = 128
  integer, allocatable, dimension(:) :: npartoftype
  real(dp), allocatable, dimension(:,:) :: massoftype !(maxfiles,maxtypes)
- real(dp) :: hfact,umass,utime,udist,gmw
+ real(dp) :: hfact,umass,utime,udist,gmw,hi,rhogasi
  integer(kind=1), allocatable, dimension(:) :: itype, ifiles
  real(4),  allocatable, dimension(:) :: tmp
  real(dp), allocatable, dimension(:) :: grainsize, graindens
@@ -243,6 +243,9 @@ subroutine read_phantom_bin_files(iunit,n_files,filenames,x,y,z,h,vx,vy,vz,parti
                          read(iunit,iostat=ierr) tmp_dp ; vxyzu(3,np0+1:np0+np) = tmp_dp
                       case('u')
                          read(iunit,iostat=ierr) tmp_dp ; vxyzu(4,np0+1:np0+np) = tmp_dp
+                      case('temperature')
+                         read(iunit,iostat=ierr) tmp_dp ; gastemperature(np0+1:np0+np) = tmp_dp
+                         got_temperature = .true.
                       case('dustfrac')
                          ngrains = ngrains + 1
                          if (ngrains > ndusttypes) then
@@ -367,18 +370,31 @@ subroutine read_phantom_bin_files(iunit,n_files,filenames,x,y,z,h,vx,vy,vz,parti
     dudt = 0.
  endif
 
+ ! Solve for temperature from Phantom dump, given ieos
  if (got_temperature) then
-    write(*,*) 'Using temperature from phantom temperature writeout'
+    write(*,*) 'Using temperature found in Phantom dump'
  elseif(got_u) then
-    write(*,*) 'Calculating temperature from u'
-    ! Phantom uses erg/g for u, and mcfost uses J/K for kb.
-    gastemperature = vxyzu(4,:) * 2./3.*gmw*amu/kb*erg_to_J * (udist/utime)**2
-    write(*,*) 'Maximum temperature = ', maxval(gastemperature)
+    if (lemission_atom .and. ieos==12) then
+       ! mu here should ideally be consistent with the abundances used for
+       ! the atomic transfer and the ionisation state, at the moment
+       ! we just assume everything is fully ionised to compute Tgas
+       write(*,*) 'Calculating temperature from u, assuming ieos=',ieos,', gmw=',gmw
+          do i=1,np
+             hi = xyzh(4,i)
+             rhogasi = massoftype(1,1)*(hfact/hi)**3  * umass/udist**3 ! g/cm3, hard-coded ifile=1
+             call get_idealplusrad_temp(rhogasi,vxyzu(4,i),gmw,gastemperature(i),ierr)  ! Takes in rho, u in cgs units
+          enddo
+    else  ! assume ieos==2
+       ! Phantom uses erg/g for u, and mcfost uses J/K for kb.
+       gastemperature = vxyzu(4,:) * 2./3.*gmw*amu/kb*erg_to_J * (udist/utime)**2
+    endif
+   !  if (mod(j,100000).eq.0) print*,i,gastemperature(j),'vel=',vxi*uvelocity,vyi*uvelocity,vzi*uvelocity,'m/s'
  else
     write(*,*) 'Gas temperature not found, setting to T=cmb to avoid dust sublimation'
     gastemperature = 2.74
  endif
 
+ write(*,*) ' max temperature is ',maxval(gastemperature),' min temperature is ',minval(gastemperature)
  write(*,*) "Found", nptmass, "point masses in the phantom file"
 
  if (got_h) then
@@ -773,7 +789,7 @@ subroutine phantom_2_mcfost(np,nptmass,ntypes,ndusttypes,n_files,dustfluidtype,x
 
   type(star_type), dimension(:), allocatable :: etoile_old
   integer  :: i,j,k,itypei,alloc_status,i_etoile, n_etoiles_old, ifile
-  real(dp) :: xi,yi,zi,hi,vxi,vyi,vzi,T_gasi,rhogasi,rhodusti,gasfraci,dustfraci,totlum,qtermi
+  real(dp) :: xi,yi,zi,hi,vxi,vyi,vzi,rhogasi,rhodusti,gasfraci,dustfraci,totlum,qtermi
   real(dp) :: udist_scaled, umass_scaled, utime_scaled,udens,uerg_per_s,uWatt,ulength_au,usolarmass,uvelocity
   real(dp) :: vphi, vr, phi, cos_phi, sin_phi, r_cyl, r_cyl2, r_sph, G_phantom
 
@@ -909,18 +925,6 @@ subroutine phantom_2_mcfost(np,nptmass,ntypes,ndusttypes,n_files,dustfluidtype,x
              rhodust(k,j) = dustfrac(k,i)*rhogasi
              massdust(k,j) = dustfrac(k,i)*massgas(j)
           enddo
-          if (lemission_atom) then
-             !
-             ! solve for the gas temperature from the thermal energy
-             ! this should only be done if the temperature is NOT read from phantom
-             ! also: mu here should ideally be consistent with the abundances used for
-             ! the atomic transfer and the ionisation state, at the moment
-             ! we just assume everything is fully ionised to compute Tgas
-             !
-             rhogasi = rhogasi*g_to_kg/cm_to_m**3
-             Tgas(j) = get_temp_from_u(rhogasi,vxyzu(4,i)*uvelocity**2,0.6_dp,ieos)
-             if (mod(j,100000).eq.0) print*,i,Tgas(j),'vel=',vxi*uvelocity,vyi*uvelocity,vzi*uvelocity,'m/s'
-          endif
        endif
     endif
  enddo
@@ -1093,6 +1097,58 @@ subroutine phantom_2_mcfost(np,nptmass,ntypes,ndusttypes,n_files,dustfluidtype,x
 
 end subroutine phantom_2_mcfost
 
+
+
+!*************************************************************************
+! routine mostly copied from Phantom to compute temperature from
+! internal energy assuming a mix of gas and radiation
+! pressure, where Trad = Tgas. That is, we solve the
+! quartic equation
+!
+!  a*T^4 + 3/2*rho*kb*T/mu = rho*u
+!
+! to determine the temperature from the supplied density
+! and internal energy (rho, u).
+! INPUT:
+!    rho - density [g/cm3]
+!    u - internal energy [erg/g]
+! OUTPUT:
+!    temp - temperature [K]
+!*************************************************************************
+subroutine get_idealplusrad_temp(rhoi,eni,mu,tempi,ierr)
+ use constantes, only:Rg,radconst,erg_to_J
+ real(dp), intent(in)    :: rhoi,eni,mu
+ real(dp), intent(inout) :: tempi
+ integer, intent(out)    :: ierr
+ real(dp)                :: gasfac,gamma,imu,numerator,denominator,correction
+ real(dp)                :: Rg_cgs,radconst_cgs
+ real(dp), parameter     :: tolerance = 1.0e-15_dp
+ integer                 :: iter
+ integer, parameter      :: iter_max = 1000
+ 
+ gamma = 5./3.
+ Rg_cgs = Rg / erg_to_J  ! erg/K/mol
+ radconst_cgs = radconst * radconst_cgs * 10.0_dp ! erg/cm3/K4
+
+ gasfac = 1./(gamma-1.)
+ imu = 1./mu
+ if (tempi <= 0.) tempi = eni*mu/(gasfac*Rg_cgs)  ! Take gas temperature as initial guess
+ 
+ ierr = 0
+ iter = 0
+ correction = huge(0.)
+ do while (abs(correction) > tolerance*tempi .and. iter < iter_max)
+    numerator = eni*rhoi - gasfac*Rg_cgs*tempi*rhoi*imu - radconst_cgs*tempi**4
+    denominator =  - gasfac*Rg_cgs*imu*rhoi - 4.*radconst_cgs*tempi**3
+    correction = numerator/denominator
+    tempi= tempi - correction
+    iter = iter + 1
+ enddo
+ if (iter >= iter_max) ierr = 1
+  
+end subroutine get_idealplusrad_temp
+
+
 !*************************************************************************
 ! routine to to compute temperature from
 ! internal energy assuming a mix of gas and radiation
@@ -1109,39 +1165,37 @@ end subroutine phantom_2_mcfost
 ! OUTPUT:
 !    temp - temperature [K]
 !*************************************************************************
-real(dp) function get_temp_from_u(rho,u,mu,ieos) result(temp)
- use constantes, only:kb_on_mh,radconst
- real(dp), intent(in) :: rho,u,mu
- integer, intent(in) :: ieos
- real(dp) :: ft,dft,dt
- real(dp), parameter :: tol = 1.e-8
- integer :: its
+! real(dp) function get_temp_from_u(rho,u,mu,ieos) result(temp)
+!  use constantes, only:kb_on_mh,radconst
+!  real(dp), intent(in) :: rho,u,mu
+!  integer, intent(in) :: ieos
+!  real(dp) :: ft,dft,dt
+!  real(dp), parameter :: tol = 1.e-8
+!  integer :: its
 
- if (ieos==2) then
-    temp = u*mu/(1.5*kb_on_mh)
-    ! temp = (u*rho/radconst)**0.25
- elseif (ieos==12) then
-    ! Take minimum of gas and radiation temperatures as initial guess
-    temp = min(u*mu/(1.5*kb_on_mh),(u*rho/radconst)**0.25)
-    print*,'rho,u  = ',rho,u,' T =',u*mu/(1.5*kb_on_mh),(u*rho/radconst)**0.25,radconst,kb_on_mh
+!  if (ieos==2) then
+!     temp = u*mu/(1.5*kb_on_mh)
+!     ! temp = (u*rho/radconst)**0.25
+!  elseif (ieos==12) then
+!     ! Take minimum of gas and radiation temperatures as initial guess
+!     temp = min(u*mu/(1.5*kb_on_mh),(u*rho/radconst)**0.25)
 
-   dt = huge(0.)
-   its = 0
-   do while (abs(dt) > tol*temp .and. its < 500)
-      its = its + 1
-      ft = u*rho - 1.5*kb_on_mh*temp*rho/mu - radconst*temp**4
-      dft = - 1.5*kb_on_mh*rho/mu - 4.*radconst*temp**3
-      dt = ft/dft ! Newton-Raphson
-      if (temp - dt > 1.2*temp) then
-         temp = 1.2*temp
-      elseif (temp - dt < 0.8*temp) then
-         temp = 0.8*temp
-      else
-         temp = temp - dt
-      endif
-   enddo
-   print*,'converged to T=',temp
- endif
-end function get_temp_from_u
+!    dt = huge(0.)
+!    its = 0
+!    do while (abs(dt) > tol*temp .and. its < 500)
+!       its = its + 1
+!       ft = u*rho - 1.5*kb_on_mh*temp*rho/mu - radconst*temp**4
+!       dft = - 1.5*kb_on_mh*rho/mu - 4.*radconst*temp**3
+!       dt = ft/dft ! Newton-Raphson
+!       if (temp - dt > 1.2*temp) then
+!          temp = 1.2*temp
+!       elseif (temp - dt < 0.8*temp) then
+!          temp = 0.8*temp
+!       else
+!          temp = temp - dt
+!       endif
+!    enddo
+!  endif
+! end function get_temp_from_u
 
 end module read_phantom

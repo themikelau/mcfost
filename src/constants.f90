@@ -27,6 +27,7 @@ module constantes
   real(kind=dp), parameter :: Na = 6.022140857e23_dp   ! Nombre d'Avogadro CODATA 2014
   real(kind=dp), parameter :: amu = 1.0_dp/Na          ! atomic mass unit [g]
   real(kind=dp), parameter :: masseH = 1.007825032231_dp * amu   ! H atom mass [g] CODATA 2014
+  real(kind=dp), parameter :: Rg = 8.31446261815324_dp   ! Gas constant              J/K/mol
   real, parameter :: mu = 2.3                          ! [g]  2.3 following Walker 2004
   real, parameter :: masse_mol_gaz = mu * masseH
   real, parameter :: T_Cmb = 2.7260                    ! K
