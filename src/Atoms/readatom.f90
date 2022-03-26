@@ -237,7 +237,7 @@ module readatom
          if (atom%ID=="H") then
 
             !Ly alpha
-            if (atom%g(i)==2 .and. atom%g(j)==8) atom%lines(kr)%write_flux_map =.true.
+            ! if (atom%g(i)==2 .and. atom%g(j)==8) atom%lines(kr)%write_flux_map =.true.
             !H alpha
             if (atom%g(i)==8 .and. atom%g(j)==18) atom%lines(kr)%write_flux_map=.true.
             !H beta
@@ -448,9 +448,10 @@ module readatom
                      ! 			call make_sub_wavelength_grid_cont_log_nu(atom%continua(kr), atom%continua(kr)%lambdamin,atom%continua(kr)%lambdamax)
                   endif
                else !no dissolve
-                  call make_sub_wavelength_grid_cont(atom%continua(kr), &
-                       atom%continua(kr)%lambdamin,atom%continua(kr)%lambdamax)
-                  ! 			call make_sub_wavelength_grid_cont_log_nu(atom%continua(kr), atom%continua(kr)%lambdamin,atom%continua(kr)%lambdamax)
+                  ! call make_sub_wavelength_grid_cont(atom%continua(kr), &
+                     !   atom%continua(kr)%lambdamin,atom%continua(kr)%lambdamax)
+                  	call make_sub_wavelength_grid_cont_log_nu(atom%continua(kr), &
+                        atom%continua(kr)%lambdamin,atom%continua(kr)%lambdamax)
                endif
                ! %lambda allocated inside the routines.
                !        CALL make_sub_wavelength_grid_cont(atom%continua(kr), atom%continua(kr)%lambdamin,atom%continua(kr)%lambdamax)
@@ -555,7 +556,7 @@ module readatom
       real, parameter :: epsilon = 5e-3
       real :: eps
       real(kind=dp) :: epsilon_l_max !if epsilon > 1/pi/adamp, the value of xwing_lorentz is negative
-      real(kind=dp) :: max_adamp, adamp, maxvel, vel, min_resol, max_resol
+      real(kind=dp) :: max_adamp, adamp, maxvel, vel
       integer, intent(in) :: unit
       character(len=MAX_LENGTH) :: inputline
       character(len=15) :: FormatLine
@@ -782,13 +783,6 @@ module readatom
             endif
          enddo
       enddo
-      hv = 0.46 * real(min_resol) * 1e-3
-
-      if (art_hv > 0.0) then
-         hv = art_hv
-      endif
-      write(*,'("R="(1F7.3)" km/s; min(Vth)="(1F7.3)" km/s; max(Vth)="(1F7.3)" km/s")') hv, min_resol * 1d-3, max_resol * 1d-3
-
 
       write(*,*) " Generating sub wavelength grid and lines boundary for all atoms..."
       do nmet=1, Natom
@@ -800,15 +794,6 @@ module readatom
 
  
             call define_local_profile_grid (Atoms(nmet)%ptr_atom%lines(kr))
-
-
-            !-> depends if we interpolate profile on finer grid !
-            !!-> linear
-            !      CALL make_sub_wavelength_grid_line_lin(Atoms(nmet)%ptr_atom%lines(kr),&
-            !                                         maxval(Atoms(nmet)%ptr_atom%vbroad), max_adamp)
-            !!-> logarithmic
-            !      CALL make_sub_wavelength_grid_line(Atoms(nmet)%ptr_atom%lines(kr),&
-            !                                         maxval(Atoms(nmet)%ptr_atom%vbroad), max_adamp)
 
 
          enddo !over lines

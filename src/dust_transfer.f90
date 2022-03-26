@@ -25,9 +25,8 @@ module dust_transfer
   use init_mcfost
   use SPH2mcfost
   use ML_ProDiMo
-
   use pluto_mod, only : setup_mhd_to_mcfost! :-)
-
+  use read_fargo3d, only : read_fargo3d_files
   !$ use omp_lib
 
   implicit none
@@ -65,7 +64,6 @@ subroutine transfert_poussiere()
   logical :: flag_star, flag_scatt, flag_ISM
 
   logical :: laffichage, flag_em_nRE, lcompute_dust_prop
-  logical :: lvoro_star
 
   ! Paramètres parallelisation
   integer :: id=1
@@ -101,18 +99,7 @@ subroutine transfert_poussiere()
   ! Building the dust grain population
   call build_grain_size_distribution()
 
-  lvoro_star = .false.
-
   if (lphantom_file .or. lgadget2_file .or. lascii_SPH_file) then
-     if (lvoro_star) then
-        llimits_file = .false.
-        limits_file = ""
-        density_file="test_voro_star.sph"
-        lascii_sph_file = .true.
-        lphantom_file = .false.
-        lgadget2_file = .false.
-        lignore_dust = .true.
-     endif
      call setup_SPH2mcfost(density_file, limits_file, n_SPH, extra_heating)
      call setup_grid()
   else if (lmhd_voronoi) then
@@ -134,10 +121,13 @@ subroutine transfert_poussiere()
         call densite_Seb_Charnoz()
      else if (lread_Seb_Charnoz2) then
         call densite_Seb_Charnoz2()
+     else if (lfargo3d) then
+        call read_fargo3d_files()
      else
         if (lsigma_file) call read_sigma_file()
         call define_density()
      endif
+
      if (lwall) call define_density_wall3D()
   endif
 
@@ -479,7 +469,15 @@ subroutine transfert_poussiere()
         if (lweight_emission) call define_proba_weight_emission(lambda)
 
         call repartition_energie(lambda)
-        if (lmono0) write(*,*) "frac. energy emitted by star : ", frac_E_stars(1)
+        if (lmono0) then
+           write(*,*) "frac. energy emitted by star(s) : ", frac_E_stars(1)
+           if (n_etoiles > 1) then
+              write(*,*) "Relative fraction of energy emitted by each star:"
+              do i=1, n_etoiles
+                 write(*,*) "Star #", i, "-->", prob_E_star(1,i)
+              enddo
+           endif
+        endif
 
      endif !letape_th
 

@@ -70,8 +70,8 @@ module Voronoi_grid
   interface
      subroutine voro(n_points, max_neighbours, limits,x,y,z,h, threshold, n_vectors, cutting_vectors, cutting_distance_o_h, &
           icell_start,icell_end, cpu_id, n_cpu, n_points_per_cpu, &
-          n_in, volume, first_neighbours,last_neighbours,n_neighbours,neighbours_list, was_cell_cut, &
-          n_stars, stars_cell, stars_radius, stellar_neighb, ierr) bind(C, name='voro_C')
+          n_in, volume, first_neighbours,last_neighbours,n_neighbours,neighbours_list, &
+          was_cell_cut, n_stars, stars_cell, stars_radius, stellar_neighb, ierr) bind(C, name='voro_C')
        use, intrinsic :: iso_c_binding
 
        integer(c_int), intent(in), value :: n_points, max_neighbours, icell_start, icell_end
@@ -194,7 +194,7 @@ module Voronoi_grid
 
     !************************************************************************
 
-  subroutine Voronoi_tesselation(n_points, particle_id, x,y,z,h, vx,vy,vz, limits, check_previous_tesselation)
+  subroutine Voronoi_tesselation(n_points, particle_id, x,y,z,h, vx,vy,vz, is_ghost, limits, check_previous_tesselation)
 
     use iso_fortran_env
     use, intrinsic :: iso_c_binding, only : c_bool
@@ -203,6 +203,7 @@ module Voronoi_grid
     integer, intent(in) :: n_points
     real(kind=dp), dimension(n_points), intent(in) :: x, y, z, h
     real(kind=dp), dimension(:), allocatable, intent(in) :: vx,vy,vz
+    integer, dimension(:), allocatable, intent(in) :: is_ghost
     integer, dimension(n_points), intent(in) :: particle_id
     real(kind=dp), dimension(6), intent(in) :: limits
     logical, intent(in) :: check_previous_tesselation
@@ -232,16 +233,8 @@ module Voronoi_grid
     character(len=2) :: unit
 
     logical, parameter :: lrandom = .true.
-!     logical :: lrandom
     integer, dimension(:), allocatable :: order,SPH_id2,SPH_original_id2
     real(kind=dp), dimension(:), allocatable :: x_tmp2,y_tmp2,z_tmp2,h_tmp2
-
-!     lrandom = lrandomize_voronoi
-!     if (lrandom) then
-!     	write(*,*) " Randomized particles, lrandom = True"
-!     else
-!     	write(*,*) " lrandom = .false."
-!     endif
 
     if (nb_proc > 16) write(*,*) "Using 16 cores for Voronoi tesselation" ! Overheads dominate above 16 cores
 
@@ -267,35 +260,36 @@ module Voronoi_grid
     icell = 0
     n_sublimate = 0
     do i=1, n_points
-       ! We test if the point is in the model volume
-       !-> Voronoi cells are now cut at the surface of the star. We only need
-       ! to test if a particle is below Rstar.
-       if ((x(i) > limits(1)).and.(x(i) < limits(2))) then
-          if ((y(i) > limits(3)).and.(y(i) < limits(4))) then
-             if ((z(i) > limits(5)).and.(z(i) < limits(6))) then
+       if (is_ghost(i) == 0) then
+          ! We test if the point is in the model volume
+          !-> Voronoi cells are now cut at the surface of the star. We only need to test if a particle is below Rstar.
+          if ((x(i) > limits(1)).and.(x(i) < limits(2))) then
+             if ((y(i) > limits(3)).and.(y(i) < limits(4))) then
+                if ((z(i) > limits(5)).and.(z(i) < limits(6))) then
 
-                ! We also test if the edge of the cell can be inside the star
-                is_outside_stars = .true.
+                   ! We also test if the edge of the cell can be inside the star
+                   is_outside_stars = .true.
 
-                loop_stars : do istar=1, n_etoiles
-                   dx = x(i) - etoile(istar)%x
-                   dy = y(i) - etoile(istar)%y
-                   dz = z(i) - etoile(istar)%z
+                   loop_stars : do istar=1, n_etoiles
+                      dx = x(i) - etoile(istar)%x
+                      dy = y(i) - etoile(istar)%y
+                      dz = z(i) - etoile(istar)%z
 
-                   if (min(dx,dy,dz) < etoile(istar)%r) then
-                      dist2 = dx**2 + dy**2 + dz**2
-                      if (dist2 < etoile(istar)%r**2) then
-                         is_outside_stars = .false.
-                         n_sublimate = n_sublimate + 1
-                         exit loop_stars
+                      if (min(dx,dy,dz) < etoile(istar)%r) then
+                         dist2 = dx**2 + dy**2 + dz**2
+                         if (dist2 < etoile(istar)%r**2) then
+                            is_outside_stars = .false.
+                            n_sublimate = n_sublimate + 1
+                            exit loop_stars
+                         endif
                       endif
-                   endif
-                enddo loop_stars
+                   enddo loop_stars
 
-                if (is_outside_stars) then
-                   icell = icell + 1
-                   SPH_id(icell) = i ; SPH_original_id(icell) = particle_id(i)
-                   x_tmp(icell) = x(i) ; y_tmp(icell) = y(i) ; z_tmp(icell) = z(i) ;  h_tmp(icell) = h(i)
+                   if (is_outside_stars) then
+                      icell = icell + 1
+                      SPH_id(icell) = i ; SPH_original_id(icell) = particle_id(i)
+                      x_tmp(icell) = x(i) ; y_tmp(icell) = y(i) ; z_tmp(icell) = z(i) ;  h_tmp(icell) = h(i)
+                   endif
                 endif
              endif
           endif
@@ -440,8 +434,8 @@ module Voronoi_grid
        !$omp reduction(+:n_in)
        id = 1
        !$ id = omp_get_thread_num() + 1
-       icell_start = (1.0 * (id-1)) / nb_proc_voro * n_cells + 1
-       icell_end = (1.0 * (id)) / nb_proc_voro * n_cells
+       icell_start = (1.0_dp * (id-1)) / nb_proc_voro * n_cells + 1
+       icell_end = (1.0_dp * (id)) / nb_proc_voro * n_cells
 
        ! Allocating results array
        alloc_status = 0
@@ -472,8 +466,8 @@ module Voronoi_grid
        !-----------------------------------------------------------
        ! We need to shift the indices of the neighbours
        do id=2, nb_proc_voro
-          icell_start = (1.0 * (id-1)) / nb_proc_voro * n_cells + 1
-          icell_end = (1.0 * (id)) / nb_proc_voro * n_cells
+          icell_start = (1.0_dp * (id-1)) / nb_proc_voro * n_cells + 1
+          icell_end = (1.0_dp * (id)) / nb_proc_voro * n_cells
 
           ! Pointers to the first and last neighbours of the cell
           first_neighbours(icell_start:icell_end) = first_neighbours(icell_start:icell_end) + last_neighbours(icell_start-1) + 1
@@ -561,7 +555,7 @@ module Voronoi_grid
           write(*,*) "WARNING: cell #", icell, "is missing"
           write(*,*) "original id =", SPH_original_id(icell)
           write(*,*) "xyz=", x_tmp(icell), y_tmp(icell), z_tmp(icell)
-          write(*,*) "volume =", volume(icell)
+          write(*,*) "volume =", volume(icell), ", was cut:", Voronoi(icell)%was_cut
        endif
 
        ! todo : find the cells touching the walls
@@ -623,8 +617,8 @@ module Voronoi_grid
 
   !**********************************************************
 
-  subroutine save_Voronoi_tesselation(limits, n_in, n_neighbours_tot, first_neighbours,&
-   last_neighbours,neighbours_list,was_cell_cut,star_neighb)
+  subroutine save_Voronoi_tesselation(limits, n_in, n_neighbours_tot, first_neighbours,last_neighbours,&
+       neighbours_list,was_cell_cut,star_neighb)
 
     use, intrinsic :: iso_c_binding, only : c_bool
 
@@ -823,10 +817,12 @@ module Voronoi_grid
     real(kind=dp), intent(out) :: x1, y1, z1, s, s_contrib, s_void_before
     integer, intent(out) :: next_cell
 
+    real(kind=dp), parameter :: prec = 1e-5
+
     real(kind=dp) :: s_tmp, den, num, s_entry, s_exit
     integer :: i, id_n, l, ifirst, ilast
 
-    integer :: i_star
+    integer :: i_star, check_cell
     real(kind=dp) :: d_to_star
     logical :: is_a_star_neighbour
 
@@ -885,13 +881,14 @@ module Voronoi_grid
           ! si c'est le wall d'entree : peut-etre a faire sauter en sauvegardant le wall d'entree
           if (s_tmp < 0.) s_tmp = huge(1.0)
        endif
-
        if (s_tmp < s) then
           s = s_tmp
           next_cell = id_n
        endif
 
     enddo nb_loop ! i
+
+    s = s * (1.0_dp + prec)
 
     x1 = x + u*s
     y1 = y + v*s
@@ -920,36 +917,35 @@ module Voronoi_grid
        	delta = b*b - c
 
        	if (delta < 0.) then ! the packet never encounters the sphere
-         	 s_void_before = s
-          	s_contrib = 0.0_dp
+           s_void_before = s
+           s_contrib = 0.0_dp
        	else ! the packet encounters the sphere
-          	rac = sqrt(delta)
-          	s1 = -b - rac
-          	s2 = -b + rac
+           rac = sqrt(delta)
+           s1 = -b - rac
+           s2 = -b + rac
 
-          	if (s1 < 0) then ! we already entered the sphere
-             	if (s2 < 0) then ! we already exited the sphere
-                	s_void_before = s
-                	s_contrib = 0.0_dp
-             	else ! We are still in the sphere and will exit it
-                	s_void_before = 0.0_dp
-                	s_contrib = min(s2,s)
-             	endif
-          	else ! We will enter in the sphere (both s1 and s2 are > 0)
-             	if (s1 < s) then ! We will enter the sphere in this cell
-                	s_void_before = s1
-                	s_contrib = min(s2,s) - s1
-             	else ! We will not enter the sphere in this sphere
-                	s_void_before = s
-                	s_contrib = 0.0_dp
-             	endif
-          	endif
+           if (s1 < 0) then ! we already entered the sphere
+              if (s2 < 0) then ! we already exited the sphere
+                 s_void_before = s
+                 s_contrib = 0.0_dp
+              else ! We are still in the sphere and will exit it
+                 s_void_before = 0.0_dp
+                 s_contrib = min(s2,s)
+              endif
+           else ! We will enter in the sphere (both s1 and s2 are > 0)
+              if (s1 < s) then ! We will enter the sphere in this cell
+                 s_void_before = s1
+                 s_contrib = min(s2,s) - s1
+              else ! We will not enter the sphere in this sphere
+                 s_void_before = s
+                 s_contrib = 0.0_dp
+              endif
+           endif
        	endif ! delta < 0
-    else ! the cell was not cut
-       s_void_before = 0.0_dp
+     else ! the cell was not cut
+        s_void_before = 0.0_dp
        s_contrib = s
     endif
-
 
     if (is_a_star_neighbour) then
        d_to_star = distance_to_star(x,y,z,u,v,w,i_star)

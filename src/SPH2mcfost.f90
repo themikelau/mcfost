@@ -6,11 +6,13 @@ module SPH2mcfost
   use sort, only : find_kth_smallest_inplace
   use density, only : normalize_dust_density, reduce_density
   use read_phantom, only : read_phantom_bin_files, read_phantom_hdf_files
+  use sort, only : index_quicksort
+  use stars, only : compute_stellar_parameters
 
   implicit none
 
   procedure(read_phantom_bin_files), pointer :: read_phantom_files => null()
-  
+
 contains
 
   subroutine setup_SPH2mcfost(SPH_file,SPH_limits_file, n_SPH, extra_heating)
@@ -25,17 +27,18 @@ contains
     integer, parameter :: iunit = 1
 
     real(dp), allocatable, dimension(:) :: x,y,z,h,vx,vy,vz,rho,massgas,SPH_grainsizes,T_gas
-    real(dp), allocatable, dimension(:) :: temp,vturb,mass_ne_on_massgas,atomic_mask
+    real(dp), allocatable, dimension(:) :: vturb,mass_ne_on_massgas,atomic_mask
     integer,  allocatable, dimension(:) :: particle_id
     real(dp), allocatable, dimension(:,:) :: rhodust, massdust
     real, allocatable, dimension(:) :: extra_heating
     logical, allocatable, dimension(:) :: mask ! size == np, not n_SPH, index is original SPH id
 
+    integer, dimension(:), allocatable :: is_ghost
     real(dp), dimension(6) :: SPH_limits
     real :: factor
     integer :: ndusttypes, ierr, i, ilen
     logical :: check_previous_tesselation
-    
+
 
     if (lphantom_file) then
        write(*,*) "Performing phantom2mcfost setup"
@@ -61,7 +64,7 @@ contains
        endif
 
        call read_phantom_files(iunit,n_phantom_files,density_files, x,y,z,h,vx,vy,vz, &
-            particle_id, massgas,massdust,rho,rhodust,temp,extra_heating,ndusttypes, &
+            particle_id, massgas,massdust,rho,rhodust,T_gas,extra_heating,ndusttypes, &
             SPH_grainsizes,mask,n_SPH,ierr)
 
        if (lphantom_avg) then ! We are averaging the dump
@@ -103,18 +106,17 @@ contains
     ! Voronoi tesselation
     check_previous_tesselation = (.not. lrandomize_Voronoi)
     call SPH_to_Voronoi(n_SPH, ndusttypes, particle_id, x,y,z,h, vx,vy,vz, &
-         temp, massgas,massdust,rho,rhodust,SPH_grainsizes, SPH_limits, check_previous_tesselation, mask=mask)
-
-    ! setup needed for Atomic line transfer
-    if (lemission_atom) then
-       call hydro_to_Voronoi_atomic(n_SPH,temp,vturb,massgas,mass_ne_on_massgas,atomic_mask)
-    endif
+         T_gas, massgas,massdust,rho,rhodust,SPH_grainsizes, SPH_limits, check_previous_tesselation, is_ghost, mask=mask)
 
     deallocate(x,y,z,h)
     if (allocated(vx)) deallocate(vx,vy,vz)
-    deallocate(massgas,rho)
     if (allocated(rhodust)) deallocate(rhodust,massdust)
-    if (allocated(temp)) deallocate(temp)
+
+    ! setup needed for Atomic line transfer
+    if (lemission_atom) then
+       call hydro_to_Voronoi_atomic(n_SPH,T_gas,vturb,massgas,mass_ne_on_massgas,atomic_mask)
+    endif
+    deallocate(massgas,rho)
     if (allocated(vturb)) deallocate(vturb)
     if (allocated(mass_ne_on_massgas)) deallocate (mass_ne_on_massgas)
     if (allocated(atomic_mask)) deallocate(atomic_mask)
@@ -155,7 +157,7 @@ contains
   !*********************************************************
 
   subroutine SPH_to_Voronoi(n_SPH, ndusttypes, particle_id, x,y,z,h, vx,vy,vz, T_gas, massgas,massdust,rho,rhodust,&
-       SPH_grainsizes, SPH_limits, check_previous_tesselation, mask)
+       SPH_grainsizes, SPH_limits, check_previous_tesselation, is_ghost, mask)
 
     ! ************************************************************************************ !
     ! n_sph : number of points in the input model
@@ -185,21 +187,24 @@ contains
     real(dp), dimension(:), allocatable, intent(inout) :: vx,vy,vz ! dimension n_SPH or 0
     real(dp), dimension(:), allocatable, intent(in) :: T_gas
     integer, dimension(n_SPH), intent(in) :: particle_id
-    real(dp), dimension(:,:), allocatable, intent(in) :: rhodust, massdust ! ndusttypes,n_SPH
+    real(dp), dimension(:,:), allocatable, intent(inout) :: rhodust, massdust ! ndusttypes,n_SPH
     real(dp), dimension(:), allocatable, intent(in) :: SPH_grainsizes ! ndusttypes
     real(dp), dimension(6), intent(in) :: SPH_limits
     logical, intent(in) :: check_previous_tesselation
     logical, dimension(:), allocatable, intent(in), optional :: mask
 
+    integer, dimension(:), allocatable, intent(out) :: is_ghost
+
+
     logical :: lwrite_ASCII = .false. ! produce an ASCII file for yorick
 
     real, allocatable, dimension(:) :: a_SPH, log_a_SPH, rho_dust
-    real(dp) :: mass, somme, Mtot, Mtot_dust
+
+    real(dp) :: mass, somme, Mtot, Mtot_dust, facteur
     real :: f, limit_threshold, density_factor
     integer :: icell, l, k, iSPH, n_force_empty, i, id_n
 
     real(dp), dimension(6) :: limits
-
 
     if (lcorrect_density_elongated_cells) then
        density_factor = correct_density_factor_elongated_cells
@@ -292,13 +297,13 @@ contains
     write(*,*) "y =", limits(3), limits(4)
     write(*,*) "z =", limits(5), limits(6)
 
+
+    call test_duplicate_particles(n_SPH, particle_id, x,y,z, massgas,massdust,rho,rhodust, is_ghost)
+
     !*******************************
     ! Voronoi tesselation
     !*******************************
-    ! Make the Voronoi tesselation on the SPH particles ---> define_Voronoi_grid : volume
-    !call Voronoi_tesselation_cmd_line(n_SPH, x,y,z, limits)
-
-    call Voronoi_tesselation(n_SPH, particle_id, x,y,z,h,vx,vy,vz, limits, check_previous_tesselation)
+    call Voronoi_tesselation(n_SPH, particle_id, x,y,z,h,vx,vy,vz, is_ghost, limits, check_previous_tesselation)
     !deallocate(x,y,z)
     write(*,*) "Using n_cells =", n_cells
 
@@ -325,6 +330,28 @@ contains
           densite_gaz(icell)  = 0.
        endif
     enddo
+
+    mass = 0.
+    do icell=1,n_cells
+       mass = mass + masse_gaz(icell)
+    enddo !icell
+    mass =  mass * g_to_Msun
+
+    if (lforce_Mgas) then ! Todo : testing for now, use a routine to avoid repeting code
+       ! Normalisation
+       if (mass > 0.0) then ! pour le cas ou gas_to_dust = 0.
+          facteur = disk_zone(1)%diskmass * disk_zone(1)%gas_to_dust / mass
+
+          ! Somme sur les zones pour densite finale
+          do icell=1,n_cells
+             densite_gaz(icell) = densite_gaz(icell) * facteur
+             masse_gaz(icell) = densite_gaz(icell) * masse_mol_gaz * volume(icell) * AU3_to_m3
+          enddo ! icell
+       else
+          call error('Gas mass is 0')
+       endif
+    endif
+
 
     ! Tableau de densite et masse de poussiere
     ! interpolation en taille
@@ -675,148 +702,64 @@ contains
   end subroutine hydro_to_Voronoi_atomic
 
 
-  subroutine compute_stellar_parameters()
+  subroutine test_duplicate_particles(n_SPH, particle_id, x,y,z, massgas,massdust,rho,rhodust, is_ghost)
+    ! Filtering particles at the same position
+    ! They are defined as ghost of the main one. The main gets the total mass and denity.
+    ! We keep the main particle_id to be able to give the ghost particle the same temperature as the main particle
 
-    integer :: i
+    integer, intent(in) :: n_SPH
+    integer, dimension(n_SPH), intent(in) :: particle_id
+    real(kind=dp), dimension(n_SPH), intent(inout) :: x, y, z, massgas, rho
+    real(dp), dimension(:,:), allocatable, intent(inout) :: rhodust, massdust
 
-    character(len=512) :: isochrone_file, filename
-    character(len=100) :: line_buffer
-    character(len=1)   :: s_age
+    integer, dimension(:), allocatable, intent(out) :: is_ghost
 
-    character(len=2) :: SpT
-    real :: L, R, T, M, minM, maxM, logg, minM_Allard, maxM_Allard, minM_Siess, maxM_Siess
-    real(kind=dp) :: Gcm_to_Rsun
-    integer :: age, k
+    real, parameter :: prec = 1e-14
 
-    logical :: lread_Siess, lread_Allard
-    integer, parameter :: nSpT_Siess = 29
-    real, dimension(nSpT_Siess) :: logR_Siess, logTeff_Siess, logM_Siess
-    integer, parameter :: nSpT_Allard = 50
-    real, dimension(nSpT_Allard) :: logR_Allard, logTeff_Allard, logM_Allard
+    real(kind=dp), dimension(:), allocatable :: x2
+    integer, dimension(:), allocatable :: order
+    real :: dr2
+    integer :: i, j, ii, jj, nkill, alloc_status
 
-    if (n_etoiles < 1) return
+    alloc_status=0
+    allocate(x2(n_SPH), order(n_SPH), is_ghost(n_SPH), stat=alloc_status)
+    if (alloc_status /=0) call error("Allocation error test_duplicate_particles")
 
-    minM_Siess = 0.1
-    maxM_siess = 7.0
+    x2(:) = x(:)**2 + y(:)**2 + z(:)**2
+    order = index_quicksort(x2)
 
-    minM_Allard = 0.0005
-    maxM_Allard = minM_Siess
+    is_ghost(:) = 0
+    nkill = 0
+    do i=1, n_SPH
+       ii = order(i)
+       loop2 : do j=i+1, n_SPH
+          jj = order(j)
+          dr2 = (x(ii)-x(jj))**2 + (y(ii)-y(jj))**2 + (z(ii)-z(jj))**2
+          if (dr2 < prec * x2(ii)) then
+             is_ghost(jj) = particle_id(ii)
+             nkill = nkill+1
 
-    ! Which models do we need to read ?
-    lread_Siess = .False. ; lread_Allard = .False.
-    do i=1, n_etoiles
-       M = etoile(i)%M
-       if (M > minM_Siess)  then
-          lread_Siess = .True.
-       else
-          lread_Allard = .True.
-       endif
-    enddo
-
-    if (lread_Siess) then
-       ! Siess models
-       isochrone_file = "Siess/isochrone_"//trim(system_age)//".txt"
-       write(*,*) "Reading isochrone file: "//trim(isochrone_file)
-       filename = trim(mcfost_utils)//"/Isochrones/"//trim(isochrone_file)
-
-       open(unit=1,file=filename,status="old")
-       do i=1,3
-          read(1,*) line_buffer
-       enddo
-       minM_Siess = 1.e30 ; maxM = 0 ;
-       do i=1, nSpT_Siess
-          read(1,*) SpT, L, r, T, M
-          logR_Siess(i) = log(r) ; logTeff_Siess(i) = log(T) ; logM_Siess(i) = log(M)
-       enddo
-       close(unit=1)
-    endif
-
-    if (lread_Allard) then
-       ! Allard models if mass < 0.1Msun
-       isochrone_file = "Allard/model.AMES-Cond-2000.M-0.0.2MASS.AB"
-       write(*,*) "Reading isochrone file: "//trim(isochrone_file)
-       filename = trim(mcfost_utils)//"/Isochrones/"//trim(isochrone_file)
-
-       s_age = system_age(1:1)
-       read(s_age,*) age ! age is an int with age in Myr
-
-       open(unit=1,file=filename,status="old")
-       Gcm_to_Rsun = 1e9 * cm_to_m/Rsun
-       ! Skipping age block
-       do k=1,age-1
-          ! header
-          do i=1,4
-             read(1,*) line_buffer
-          enddo
-          ! data
-          line_loop : do i=1,nSpT_Allard
-             read(1,'(A)') line_buffer
-             if (line_buffer(1:1) == "-") exit line_loop
-          enddo line_loop
-       enddo
-
-       ! header
-       do i=1,4
-          read(1,*) line_buffer
-       enddo
-       ! data
-       k=0
-       line_loop2 : do i=1,nSpT_Allard
-          read(1,'(A)') line_buffer
-          if (line_buffer(1:1) == "-") exit line_loop2
-          k = k+1
-          read(line_buffer,*) M, T, L, logg, R
-          logR_Allard(i) = log(r * Gcm_to_Rsun) ; logTeff_Allard(i) = log(T) ; logM_Allard(i) = log(M)
-       enddo line_loop2
-       close(unit=1)
-    endif
-
-    ! interpoler L et T, les fonctions sont plus smooth
-    write(*,*) ""
-    write(*,*) "New stellar parameters:"
-    do i=1, n_etoiles
-       if (lturn_off_planets .and. i>1) then
-          write(*,*) " "
-          write(*,*) "*** WARNING : turning off emission fron sink particle"
-          write(*,*) "*** object #", i, "M=", etoile(i)%M, "Msun"
-          write(*,*) "*** The object will not radiate"
-          etoile(i)%T = 3.
-          etoile(i)%r = 1e-4
-       else if (etoile(i)%M < minM_Allard) then
-          write(*,*) " "
-          write(*,*) "*** WARNING : stellar object mass is below isochrone range"
-          write(*,*) "*** object #", i, "M=", etoile(i)%M, "Msun"
-          write(*,*) "*** The object will not radiate"
-          etoile(i)%T = 3.
-          etoile(i)%r = 0.01
-       else if (etoile(i)%M < maxM_Allard) then
-          etoile(i)%T = exp(interp(logTeff_Allard(1:k), logM_Allard(1:k), log(etoile(i)%M)))
-          etoile(i)%r = exp(interp(logR_Allard(1:k), logM_Allard(1:k), log(etoile(i)%M)))
-       else ! using Siess' models
-          if (etoile(i)%M > maxM_Siess) then
-             write(*,*) " "
-             write(*,*) "*** WARNING : stellar object mass is above in isochrone range"
-             write(*,*) "*** object #", i, "M=", etoile(i)%M, "Msun"
-             write(*,*) "*** Stellar properties are extrapolated"
+             ! Adding ghost particle to main one
+             rho(ii) = rho(ii) + rho(jj)
+             massgas(ii) = massgas(ii) + massgas(jj)
+             rhodust(:,ii) = rhodust(:,ii) + rhodust(:,jj)
+             massdust(:,ii) = massdust(:,ii) + massdust(:,jj)
+          else
+             exit loop2
           endif
-          etoile(i)%T = exp(interp(logTeff_Siess, logM_Siess, log(etoile(i)%M)))
-          etoile(i)%r = exp(interp(logR_Siess, logM_Siess, log(etoile(i)%M)))
-       endif
+       enddo loop2 ! j
+    enddo ! i
+    deallocate(order,x2)
 
-       ! Pas de fUV et pas de spectre stellaire pour le moment
-       etoile(i)%fUV = 0.0 ; etoile(i)%slope_UV = 0.0 ;
-       etoile(i)%lb_body = .false.
-       etoile(i)%spectre = "None"
-
-       write(*,*) "Star #",i,"  Teff=", etoile(i)%T, "K, r=", etoile(i)%r, "Rsun"
-    enddo
-
-    ! Passage rayon en AU
-    etoile(:)%r = etoile(:)%r * Rsun_to_AU
+    if (nkill > 0) then
+       write(*,*)
+       write(*,*) nkill, "SPH particles were flagged as ghosts and merged"
+       write(*,*)
+    endif
 
     return
 
-  end subroutine compute_stellar_parameters
+  end subroutine test_duplicate_particles
 
   !*********************************************************
 
@@ -976,7 +919,7 @@ contains
     return
 
   end subroutine read_ascii_SPH_file
-  
+
 
 subroutine test_voro_star(x,y,z,h,vx,vy,vz,T_gas,massgas,rhogas,rhodust,particle_id,ndusttypes,n_sph)
     use naleat, only : seed, stream, gtype
@@ -1013,14 +956,14 @@ subroutine test_voro_star(x,y,z,h,vx,vy,vz,T_gas,massgas,rhogas,rhodust,particle
     if (allocated(x)) then
     	deallocate(x,y,z,h,vx,vy,vz,T_gas,massgas,rhogas,rhodust,particle_id)
     endif
-    
+
     n_sph = 100000
 
     alloc_status = 0
     allocate(x(n_SPH),y(n_SPH),z(n_SPH),h(n_SPH),massgas(n_SPH),rhogas(n_SPH),particle_id(n_sph), &
     	vx(n_sph), vy(n_sph), vz(n_sph), T_gas(n_sph), stat=alloc_status)
     if (alloc_status /=0) call error("Allocation error in phanton_2_mcfost")
-    
+
     id = 1
     do i=1, n_sph
        particle_id(i) = i
@@ -1043,8 +986,8 @@ subroutine test_voro_star(x,y,z,h,vx,vy,vz,T_gas,massgas,rhogas,rhodust,particle
        rhogas(i) = massgas(i)
        h(i) = 3.0 * rmo * etoile(1)%r
     enddo
-    
-    
+
+
     deallocate(stream)
 
 
