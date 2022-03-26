@@ -659,6 +659,9 @@ subroutine initialisation_mcfost()
      case("-electron_scatt") !force solving ne density even if provided in the model
         i_arg = i_arg + 1
         lelectron_scattering = .true.
+     case("-no_electron_scatt")
+        i_arg = i_arg + 1
+        lelectron_scattering = .false.
      case("-iterate_ne_mc") !force solving ne density during MC steps.
         i_arg = i_arg + 1
         lno_iterate_ne_mc = .false.
@@ -899,6 +902,7 @@ subroutine initialisation_mcfost()
         lphantom_file=.true.
         lVoronoi = .true.
         l3D = .true.
+        lelectron_scattering = .true.
         call get_command_argument(i_arg,s)
         n_phantom_files = 1
         allocate(density_files(n_phantom_files))

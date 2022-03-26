@@ -879,7 +879,7 @@ subroutine phantom_2_mcfost(np,nptmass,ntypes,ndusttypes,n_files,dustfluidtype,x
     vxi = vxyzu(1,i)
     vyi = vxyzu(2,i)
     vzi = vxyzu(3,i)
-    T_gasi = gastemperature(i)
+    Tgas(i) = gastemperature(i)
 
     itypei = abs(iphase(i))
     if (hi > 0.) then
